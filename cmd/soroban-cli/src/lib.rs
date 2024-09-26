@@ -3,16 +3,26 @@
     clippy::must_use_candidate,
     clippy::missing_panics_doc
 )]
+use std::path::Path;
+
+pub(crate) use soroban_env_host::xdr;
+pub(crate) use soroban_rpc as rpc;
+
+mod cli;
+pub use cli::main;
+
 pub mod commands;
+pub mod config;
 pub mod fee;
+pub mod get_spec;
 pub mod key;
 pub mod log;
-pub mod rpc;
+pub mod print;
+pub mod signer;
 pub mod toid;
+pub mod upgrade_check;
 pub mod utils;
 pub mod wasm;
-
-use std::path::Path;
 
 pub use commands::Root;
 

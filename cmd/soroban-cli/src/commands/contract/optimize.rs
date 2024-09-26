@@ -23,7 +23,7 @@ pub enum Error {
     #[error("optimization error: {0}")]
     OptimizationError(OptimizationError),
     #[cfg(not(feature = "opt"))]
-    #[error("Must install with \"opt\" feature, e.g. `cargo install soroban-cli --features opt")]
+    #[error("Must install with \"opt\" feature, e.g. `cargo install --locked soroban-cli --features opt")]
     Install,
 }
 
@@ -48,7 +48,6 @@ impl Cmd {
             wasm_out.set_extension("optimized.wasm");
             wasm_out
         });
-        println!("Writing to: {}...", wasm_out.to_string_lossy());
 
         let mut options = OptimizationOptions::new_optimize_for_size_aggressively();
         options.converge = true;

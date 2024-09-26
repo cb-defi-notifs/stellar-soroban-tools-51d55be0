@@ -1,11 +1,11 @@
-use soroban_cli::commands::contract;
+use soroban_cli::commands::contract::{self, arg_parsing};
 use soroban_test::TestEnv;
 
-use crate::util::{invoke_custom as invoke, CUSTOM_TYPES};
+use crate::util::{invoke_custom as invoke, CUSTOM_TYPES, DEFAULT_CONTRACT_ID};
 
 async fn invoke_custom(func: &str, args: &str) -> Result<String, contract::invoke::Error> {
     let e = &TestEnv::default();
-    invoke(e, "1", func, args, &CUSTOM_TYPES.path()).await
+    invoke(e, DEFAULT_CONTRACT_ID, func, args, &CUSTOM_TYPES.path()).await
 }
 
 #[tokio::test]
@@ -55,7 +55,7 @@ async fn complex_enum_help() {
 async fn multi_arg_failure() {
     assert!(matches!(
         invoke_custom("multi_args", "--b").await.unwrap_err(),
-        contract::invoke::Error::MissingArgument(_)
+        contract::invoke::Error::ArgParsing(arg_parsing::Error::MissingArgument(_))
     ));
 }
 
@@ -64,7 +64,9 @@ async fn handle_arg_larger_than_i32_failure() {
     let res = invoke_custom("i32_", &format!("--i32_={}", u32::MAX)).await;
     assert!(matches!(
         res,
-        Err(contract::invoke::Error::CannotParseArg { .. })
+        Err(contract::invoke::Error::ArgParsing(
+            arg_parsing::Error::CannotParseArg { .. }
+        ))
     ));
 }
 
@@ -73,7 +75,9 @@ async fn handle_arg_larger_than_i64_failure() {
     let res = invoke_custom("i64_", &format!("--i64_={}", u64::MAX)).await;
     assert!(matches!(
         res,
-        Err(contract::invoke::Error::CannotParseArg { .. })
+        Err(contract::invoke::Error::ArgParsing(
+            arg_parsing::Error::CannotParseArg { .. }
+        ))
     ));
 }
 

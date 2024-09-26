@@ -3,17 +3,20 @@ use std::{fmt::Debug, path::Path, str::FromStr};
 use clap::{command, Parser};
 use soroban_env_host::xdr::{
     Error as XdrError, ExtensionPoint, LedgerEntry, LedgerEntryChange, LedgerEntryData,
-    LedgerFootprint, Memo, MuxedAccount, Operation, OperationBody, OperationMeta, Preconditions,
-    RestoreFootprintOp, SequenceNumber, SorobanResources, SorobanTransactionData, Transaction,
-    TransactionExt, TransactionMeta, TransactionMetaV3, TtlEntry, Uint256,
+    LedgerFootprint, Limits, Memo, MuxedAccount, Operation, OperationBody, OperationMeta,
+    Preconditions, RestoreFootprintOp, SequenceNumber, SorobanResources, SorobanTransactionData,
+    Transaction, TransactionExt, TransactionMeta, TransactionMetaV3, TtlEntry, Uint256, WriteXdr,
 };
 use stellar_strkey::DecodeError;
 
 use crate::{
     commands::{
-        config::{self, locator},
         contract::extend,
+        global,
+        txn_result::{TxnEnvelopeResult, TxnResult},
+        NetworkRunnable,
     },
+    config::{self, data, locator, network},
     key,
     rpc::{self, Client},
     wasm, Pwd,
@@ -82,13 +85,23 @@ pub enum Error {
     Key(#[from] key::Error),
     #[error(transparent)]
     Extend(#[from] extend::Error),
+    #[error(transparent)]
+    Data(#[from] data::Error),
+    #[error(transparent)]
+    Network(#[from] network::Error),
 }
 
 impl Cmd {
     #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), Error> {
-        let expiration_ledger_seq = self.run_against_rpc_server().await?;
-
+        let res = self.run_against_rpc_server(None, None).await?.to_envelope();
+        let expiration_ledger_seq = match res {
+            TxnEnvelopeResult::TxnEnvelope(tx) => {
+                println!("{}", tx.to_xdr_base64(Limits::none())?);
+                return Ok(());
+            }
+            TxnEnvelopeResult::Res(res) => res,
+        };
         if let Some(ledgers_to_extend) = self.ledgers_to_extend {
             extend::Cmd {
                 key: self.key.clone(),
@@ -105,23 +118,32 @@ impl Cmd {
 
         Ok(())
     }
+}
 
-    pub async fn run_against_rpc_server(&self) -> Result<u32, Error> {
-        let network = self.config.get_network()?;
+#[async_trait::async_trait]
+impl NetworkRunnable for Cmd {
+    type Error = Error;
+    type Result = TxnResult<u32>;
+
+    async fn run_against_rpc_server(
+        &self,
+        args: Option<&global::Args>,
+        config: Option<&config::Args>,
+    ) -> Result<TxnResult<u32>, Error> {
+        let config = config.unwrap_or(&self.config);
+        let network = config.get_network()?;
         tracing::trace!(?network);
-        let entry_keys = self.key.parse_keys()?;
-        let network = &self.config.get_network()?;
+        let entry_keys = self.key.parse_keys(&config.locator, &network)?;
         let client = Client::new(&network.rpc_url)?;
-        let key = self.config.key_pair()?;
+        let key = config.source_account()?;
 
         // Get the account sequence number
-        let public_strkey =
-            stellar_strkey::ed25519::PublicKey(key.verifying_key().to_bytes()).to_string();
+        let public_strkey = key.to_string();
         let account_details = client.get_account(&public_strkey).await?;
         let sequence: i64 = account_details.seq_num.into();
 
         let tx = Transaction {
-            source_account: MuxedAccount::Ed25519(Uint256(key.verifying_key().to_bytes())),
+            source_account: MuxedAccount::Ed25519(Uint256(key.0)),
             fee: self.fee.fee,
             seq_num: SequenceNumber(sequence + 1),
             cond: Preconditions::None,
@@ -140,19 +162,27 @@ impl Cmd {
                         read_only: vec![].try_into()?,
                         read_write: entry_keys.try_into()?,
                     },
-                    instructions: 0,
+                    instructions: self.fee.instructions.unwrap_or_default(),
                     read_bytes: 0,
                     write_bytes: 0,
                 },
                 resource_fee: 0,
             }),
         };
-
-        let (result, meta, events) = client
-            .prepare_and_send_transaction(&tx, &key, &[], &network.network_passphrase, None, None)
+        if self.fee.build_only {
+            return Ok(TxnResult::Txn(tx));
+        }
+        let res = client
+            .send_transaction_polling(&config.sign_with_local_key(tx).await?)
             .await?;
-
-        tracing::trace!(?result);
+        if args.map_or(true, |a| !a.no_cache) {
+            data::write(res.clone().try_into()?, &network.rpc_uri()?)?;
+        }
+        let meta = res
+            .result_meta
+            .as_ref()
+            .ok_or(Error::MissingOperationResult)?;
+        let events = res.events()?;
         tracing::trace!(?meta);
         if !events.is_empty() {
             tracing::info!("Events:\n {events:#?}");
@@ -177,12 +207,14 @@ impl Cmd {
                 operations[0].changes.len()
             );
         }
-        parse_operations(&operations).ok_or(Error::MissingOperationResult)
+        Ok(TxnResult::Res(
+            parse_operations(operations).ok_or(Error::MissingOperationResult)?,
+        ))
     }
 }
 
 fn parse_operations(ops: &[OperationMeta]) -> Option<u32> {
-    ops.get(0).and_then(|op| {
+    ops.first().and_then(|op| {
         op.changes.iter().find_map(|entry| match entry {
             LedgerEntryChange::Updated(LedgerEntry {
                 data:

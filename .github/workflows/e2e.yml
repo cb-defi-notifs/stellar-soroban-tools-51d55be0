@@ -5,6 +5,10 @@ on:
     branches: [main, release/**]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_protected == 'true' && github.sha || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   integration:
     name: System tests
@@ -13,20 +17,30 @@ jobs:
         scenario-filter: ["^TestDappDevelop$/^.*$"]
     runs-on: ubuntu-latest-4-cores
     env:
+      # where git refs and images are available for the same artifact, the image
+      # can be set to pull a pre-compiled image from dockerhub, while the git
+      # refs can be used to build from source within this workflow.
+
       # the gh tag of system-test repo version to run
       SYSTEM_TEST_GIT_REF: master
 
-      # the soroban tools source code to compile and run from system test
-      # refers to checked out source of current git hub ref context
-      SYSTEM_TEST_SOROBAN_TOOLS_REF: ${{ github.workspace }}/soroban-tools
+      # the pre-compiled image to use of quickstart, or the git ref to build
+      # from source.
+      SYSTEM_TEST_QUICKSTART_IMAGE: stellar/quickstart:testing
+      # SYSTEM_TEST_QUICKSTART_GIT_REF: "https://github.com/stellar/quickstart.git#master"
 
-      # core git ref should be latest commit for stable soroban functionality
-      # the core bin can either be compiled in-line here as part of ci,
-      SYSTEM_TEST_CORE_GIT_REF: https://github.com/stellar/stellar-core.git#ecb24df104c2453a00fa5097d2e879d7731b9596
-      SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS: "--disable-tests"
-      # or set SYSTEM_TEST_CORE_GIT_REF to empty, and set SYSTEM_TEST_CORE_IMAGE
-      # to pull a pre-compiled image from dockerhub instead
-      SYSTEM_TEST_CORE_IMAGE:
+      # the version of components built in quickstart. only used if quickstart
+      # is configured above to build from source.
+      # SYSTEM_TEST_PROTOCOL_VERSION_DEFAULT: 21
+      # SYSTEM_TEST_RS_XDR_GIT_REF: v21.0.1
+      # SYSTEM_TEST_CORE_IMAGE:
+      # SYSTEM_TEST_CORE_GIT_REF: https://github.com/stellar/stellar-core.git#v21.0.0rc1
+      # SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS: "--disable-tests"
+      # SYSTEM_TEST_SOROBAN_RPC_REF: https://github.com/stellar/soroban-rpc.git#v21.0.1
+
+      # the soroban CLI & RPC source code to compile and run from system test
+      # refers to checked out source of current git hub ref context
+      SYSTEM_TEST_SOROBAN_CLI_REF: ${{ github.workspace }}/soroban-cli
 
       # sets the version of rust toolchain that will be pre-installed in the
       # test runtime environment, tests invoke rustc/cargo
@@ -34,18 +48,13 @@ jobs:
 
       # set the version of js-stellar-sdk to use, need to choose one of either
       # resolution options, using npm release or a gh ref:
-      #
       # option #1, set the version of stellar-sdk based on a npm release version
-      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: v11.0.0-beta.6
+      SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION: 12.2.0
       # option #2, set the version of stellar-sdk used as a ref to a gh repo if
       # a value is set on SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO, it takes
       # precedence over any SYSTEM_TEST_JS_STELLAR_SDK_NPM_VERSION
-      SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO:
-      SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
-
-      # system test will build quickstart image internally to use for running the service stack
-      # configured in standalone network mode(core, rpc)
-      SYSTEM_TEST_QUICKSTART_GIT_REF: https://github.com/stellar/quickstart.git#69a1089eee9aaac4bafe4cbfc0639de18222db6a
+      # SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO:
+      # SYSTEM_TEST_JS_STELLAR_SDK_GH_REF:
 
       # triggers system test to log out details from quickstart's logs and test steps
       SYSTEM_TEST_VERBOSE_OUTPUT: "true"
@@ -53,27 +62,31 @@ jobs:
       # the soroban test cases will compile various contracts from the examples repo
       SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_HASH: "main"
       SYSTEM_TEST_SOROBAN_EXAMPLES_GIT_REPO: "https://github.com/stellar/soroban-examples.git"
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        name: checkout current pr source
+        with:
+          path: soroban-cli
+      - uses: actions/checkout@v4
         name: checkout system-test
         with:
           repository: stellar/system-test
           ref: ${{ env.SYSTEM_TEST_GIT_REF }}
           path: system-test
-      - uses: actions/checkout@v3
-        name: checkout soroban-tools
-        with:
-          path: soroban-tools
+
       - if: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''}}
         name: prepare local js-stellar-sdk
         run: |
           rm -rf $GITHUB_WORKSPACE/system-test/js-stellar-sdk;
+
       - if: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO != ''}}
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REPO }}
           ref: ${{ env.SYSTEM_TEST_JS_STELLAR_SDK_GH_REF }}
           path: system-test/js-stellar-sdk
+
       - uses: stellar/actions/rust-cache@main
       - name: Build system test with component versions
         run: |
@@ -84,15 +97,19 @@ jobs:
             JS_STELLAR_SDK_REF="file:/home/tester/js-stellar-sdk"; \
           fi
           make \
+            PROTOCOL_VERSION_DEFAULT=$SYSTEM_TEST_PROTOCOL_VERSION_DEFAULT \
             CORE_GIT_REF=$SYSTEM_TEST_CORE_GIT_REF \
             CORE_COMPILE_CONFIGURE_FLAGS="$SYSTEM_TEST_CORE_COMPILE_CONFIGURE_FLAGS" \
             CORE_IMAGE=$SYSTEM_TEST_CORE_IMAGE \
-            SOROBAN_RPC_GIT_REF=$SYSTEM_TEST_SOROBAN_TOOLS_REF \
-            SOROBAN_CLI_GIT_REF=$SYSTEM_TEST_SOROBAN_TOOLS_REF \
+            SOROBAN_RPC_GIT_REF=$SYSTEM_TEST_SOROBAN_RPC_REF \
+            SOROBAN_CLI_GIT_REF=$SYSTEM_TEST_SOROBAN_CLI_REF \
             RUST_TOOLCHAIN_VERSION=$SYSTEM_TEST_RUST_TOOLCHAIN_VERSION \
+            RS_XDR_GIT_REF=$SYSTEM_TEST_RS_XDR_GIT_REF \
+            QUICKSTART_IMAGE=$SYSTEM_TEST_QUICKSTART_IMAGE \
             QUICKSTART_GIT_REF=$SYSTEM_TEST_QUICKSTART_GIT_REF \
             JS_STELLAR_SDK_NPM_VERSION=$JS_STELLAR_SDK_REF \
             build
+
       - name: Run system test scenarios
         run: |
           docker run --rm -t --name e2e_test stellar/system-test:dev \

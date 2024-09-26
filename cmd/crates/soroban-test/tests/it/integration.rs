@@ -1,5 +1,10 @@
+mod bindings;
+mod cookbook;
 mod custom_types;
 mod dotenv;
+mod fund;
 mod hello_world;
+mod snapshot;
+mod tx;
 mod util;
 mod wrap;

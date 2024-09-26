@@ -1,8 +1,14 @@
+pub mod alias;
+pub mod arg_parsing;
+pub mod asset;
 pub mod bindings;
 pub mod build;
 pub mod deploy;
 pub mod extend;
 pub mod fetch;
+pub mod id;
+pub mod info;
+pub mod init;
 pub mod inspect;
 pub mod install;
 pub mod invoke;
@@ -14,6 +20,14 @@ use crate::commands::global;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Cmd {
+    /// Utilities to deploy a Stellar Asset Contract or get its id
+    #[command(subcommand)]
+    Asset(asset::Cmd),
+
+    /// Utilities to manage contract aliases
+    #[command(subcommand)]
+    Alias(alias::Cmd),
+
     /// Generate code client bindings for a contract
     #[command(subcommand)]
     Bindings(bindings::Cmd),
@@ -25,11 +39,22 @@ pub enum Cmd {
     /// If no keys are specified the contract itself is extended.
     Extend(extend::Cmd),
 
-    /// Deploy a contract
-    Deploy(deploy::Cmd),
+    /// Deploy a wasm contract
+    Deploy(deploy::wasm::Cmd),
 
     /// Fetch a contract's Wasm binary
     Fetch(fetch::Cmd),
+
+    /// Generate the contract id for a given contract or asset
+    #[command(subcommand)]
+    Id(id::Cmd),
+
+    /// Access info about contracts
+    #[command(subcommand)]
+    Info(info::Cmd),
+
+    /// Initialize a Soroban project with an example contract
+    Init(init::Cmd),
 
     /// Inspect a WASM file listing contract functions, meta, etc
     Inspect(inspect::Cmd),
@@ -44,7 +69,7 @@ pub enum Cmd {
     /// everything after the `--`, gets passed to this implicit CLI. Get in-depth help for a given
     /// contract:
     ///
-    ///     soroban contract invoke ... -- --help
+    ///     stellar contract invoke ... -- --help
     Invoke(invoke::Cmd),
 
     /// Optimize a WASM file
@@ -62,6 +87,12 @@ pub enum Cmd {
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
+    Asset(#[from] asset::Error),
+
+    #[error(transparent)]
+    Alias(#[from] alias::Error),
+
+    #[error(transparent)]
     Bindings(#[from] bindings::Error),
 
     #[error(transparent)]
@@ -71,10 +102,19 @@ pub enum Error {
     Extend(#[from] extend::Error),
 
     #[error(transparent)]
-    Deploy(#[from] deploy::Error),
+    Deploy(#[from] deploy::wasm::Error),
 
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
+
+    #[error(transparent)]
+    Init(#[from] init::Error),
+
+    #[error(transparent)]
+    Id(#[from] id::Error),
+
+    #[error(transparent)]
+    Info(#[from] info::Error),
 
     #[error(transparent)]
     Inspect(#[from] inspect::Error),
@@ -98,12 +138,17 @@ pub enum Error {
 impl Cmd {
     pub async fn run(&self, global_args: &global::Args) -> Result<(), Error> {
         match &self {
+            Cmd::Asset(asset) => asset.run().await?,
             Cmd::Bindings(bindings) => bindings.run().await?,
             Cmd::Build(build) => build.run()?,
             Cmd::Extend(extend) => extend.run().await?,
-            Cmd::Deploy(deploy) => deploy.run().await?,
+            Cmd::Alias(alias) => alias.run(global_args)?,
+            Cmd::Deploy(deploy) => deploy.run(global_args).await?,
+            Cmd::Id(id) => id.run()?,
+            Cmd::Info(info) => info.run().await?,
+            Cmd::Init(init) => init.run(global_args)?,
             Cmd::Inspect(inspect) => inspect.run()?,
-            Cmd::Install(install) => install.run().await?,
+            Cmd::Install(install) => install.run(global_args).await?,
             Cmd::Invoke(invoke) => invoke.run(global_args).await?,
             Cmd::Optimize(optimize) => optimize.run()?,
             Cmd::Fetch(fetch) => fetch.run().await?,

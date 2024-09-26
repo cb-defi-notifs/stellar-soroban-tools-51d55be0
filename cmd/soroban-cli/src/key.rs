@@ -1,14 +1,14 @@
-use clap::arg;
-use soroban_env_host::xdr::{
-    self, LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, ReadXdr, ScAddress, ScVal,
-};
-use std::path::PathBuf;
-
 use crate::{
     commands::contract::Durability,
-    utils::{self},
+    config::{locator, network::Network},
     wasm,
 };
+use clap::arg;
+use soroban_env_host::xdr::{
+    self, LedgerKey, LedgerKeyContractCode, LedgerKeyContractData, Limits, ReadXdr, ScAddress,
+    ScVal,
+};
+use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -20,6 +20,8 @@ pub enum Error {
     CannotParseContractId(String, stellar_strkey::DecodeError),
     #[error(transparent)]
     Wasm(#[from] wasm::Error),
+    #[error(transparent)]
+    Locator(#[from] locator::Error),
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -58,12 +60,18 @@ pub struct Args {
     )]
     pub wasm_hash: Option<String>,
     /// Storage entry durability
-    #[arg(long, value_enum, required = true)]
+    #[arg(long, value_enum, default_value = "persistent")]
     pub durability: Durability,
 }
 
 impl Args {
-    pub fn parse_keys(&self) -> Result<Vec<LedgerKey>, Error> {
+    pub fn parse_keys(
+        &self,
+        locator: &locator::Args,
+        Network {
+            network_passphrase, ..
+        }: &Network,
+    ) -> Result<Vec<LedgerKey>, Error> {
         let keys = if let Some(keys) = &self.key {
             keys.iter()
                 .map(|key| {
@@ -75,35 +83,32 @@ impl Args {
                 .collect::<Result<Vec<_>, Error>>()?
         } else if let Some(keys) = &self.key_xdr {
             keys.iter()
-                .map(|s| Ok(ScVal::from_xdr_base64(s)?))
+                .map(|s| Ok(ScVal::from_xdr_base64(s, Limits::none())?))
                 .collect::<Result<Vec<_>, Error>>()?
         } else if let Some(wasm) = &self.wasm {
             return Ok(vec![crate::wasm::Args { wasm: wasm.clone() }.try_into()?]);
         } else if let Some(wasm_hash) = &self.wasm_hash {
             return Ok(vec![LedgerKey::ContractCode(LedgerKeyContractCode {
                 hash: xdr::Hash(
-                    utils::contract_id_from_str(wasm_hash)
+                    soroban_spec_tools::utils::contract_id_from_str(wasm_hash)
                         .map_err(|e| Error::CannotParseContractId(wasm_hash.clone(), e))?,
                 ),
             })]);
         } else {
             vec![ScVal::LedgerKeyContractInstance]
         };
-        let contract_id = contract_id(self.contract_id.as_ref().unwrap())?;
+        let contract =
+            locator.resolve_contract_id(self.contract_id.as_ref().unwrap(), network_passphrase)?;
 
         Ok(keys
             .into_iter()
             .map(|key| {
                 LedgerKey::ContractData(LedgerKeyContractData {
-                    contract: ScAddress::Contract(xdr::Hash(contract_id)),
+                    contract: ScAddress::Contract(xdr::Hash(contract.0)),
                     durability: (&self.durability).into(),
                     key,
                 })
             })
             .collect())
     }
-}
-
-fn contract_id(s: &str) -> Result<[u8; 32], Error> {
-    utils::contract_id_from_str(s).map_err(|e| Error::CannotParseContractId(s.to_string(), e))
 }

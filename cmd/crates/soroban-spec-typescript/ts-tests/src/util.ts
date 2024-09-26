@@ -1,27 +1,22 @@
-import { Keypair, TransactionBuilder } from "soroban-client";
+import { spawnSync } from "node:child_process";
+import { Address, Keypair } from "@stellar/stellar-sdk";
+import { basicNodeSigner } from "@stellar/stellar-sdk/contract";
+
+const rootKeypair = Keypair.fromSecret(
+  spawnSync("./soroban", ["keys", "show", "root"], {
+    shell: true,
+    encoding: "utf8",
+  }).stdout.trim(),
+);
+
+export const root = {
+  keypair: rootKeypair,
+  address: Address.fromString(rootKeypair.publicKey()),
+};
 
 export const rpcUrl = process.env.SOROBAN_RPC_URL ?? "http://localhost:8000/";
-export const secretKey =
-  "SC36BWNUOCZAO7DMEJNNKFV6BOTPJP7IG5PSHLUOLT6DZFRU3D3XGIXW";
+export const networkPassphrase =
+  process.env.SOROBAN_NETWORK_PASSPHRASE ??
+  "Standalone Network ; February 2017";
 
-const keypair = Keypair.fromSecret(secretKey);
-export const publicKey = keypair.publicKey();
-const networkPassphrase = "Standalone Network ; February 2017";
-
-export const wallet = {
-  isConnected: () => Promise.resolve(true),
-  isAllowed: () => Promise.resolve(true),
-  getUserInfo: () => Promise.resolve({ publicKey }),
-  signTransaction: async (
-    tx: string,
-    _opts?: {
-      network?: string;
-      networkPassphrase?: string;
-      accountToSign?: string;
-    }
-  ) => {
-    const t = TransactionBuilder.fromXDR(tx, networkPassphrase);
-    t.sign(keypair);
-    return t.toXDR();
-  },
-};
+export const signer = basicNodeSigner(root.keypair, networkPassphrase);

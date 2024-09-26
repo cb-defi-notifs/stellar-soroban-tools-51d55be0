@@ -1,54 +1,86 @@
 use assert_fs::TempDir;
-use soroban_test::TestEnv;
+use soroban_test::{AssertExt, TestEnv};
 use std::{fs, path::Path};
 
-use crate::util::{add_identity, add_test_id, SecretKind, DEFAULT_SEED_PHRASE};
-use soroban_cli::commands::config::network;
+use crate::util::{add_key, add_test_id, SecretKind, DEFAULT_SEED_PHRASE};
+use soroban_cli::commands::network;
+use soroban_cli::config::network::passphrase::LOCAL as LOCAL_NETWORK_PASSPHRASE;
 
-const NETWORK_PASSPHRASE: &str = "Local Sandbox Stellar Network ; September 2022";
+fn ls(sandbox: &TestEnv) -> Vec<String> {
+    sandbox
+        .new_assert_cmd("network")
+        .arg("ls")
+        .assert()
+        .stdout_as_str()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+}
 
 #[test]
 fn set_and_remove_network() {
     TestEnv::with_default(|sandbox| {
         add_network(sandbox, "local");
         let dir = sandbox.dir().join(".soroban").join("network");
-        let read_dir = std::fs::read_dir(dir);
-        println!("{read_dir:#?}");
-        let file = read_dir.unwrap().next().unwrap().unwrap();
+        let mut read_dir = std::fs::read_dir(dir).unwrap();
+        let file = read_dir.next().unwrap().unwrap();
         assert_eq!(file.file_name().to_str().unwrap(), "local.toml");
-
-        let res = sandbox.cmd::<network::ls::Cmd>("");
-        let res = res.ls().unwrap();
-        assert_eq!(res.len(), 1);
-        assert_eq!(&res[0], "local");
-
-        sandbox.cmd::<network::rm::Cmd>("local").run().unwrap();
-
-        // sandbox
-        //     .new_assert_cmd("config")
-        //     .arg("network")
-        //     .arg("rm")
-        //     .arg("local")
-        //     .assert()
-        //     .stdout("");
+        let res = ls(sandbox);
+        assert_eq!(res[0], "local");
         sandbox
-            .new_assert_cmd("config")
-            .arg("network")
+            .new_assert_cmd("network")
+            .arg("rm")
+            .arg("local")
+            .assert()
+            .success();
+
+        sandbox
+            .new_assert_cmd("network")
             .arg("ls")
             .assert()
             .stdout("\n");
     });
 }
 
+#[test]
+fn use_default_futurenet() {
+    TestEnv::with_default(|sandbox| {
+        sandbox
+            .new_assert_cmd("keys")
+            .args(["generate", "alice", "--network", "futurenet"])
+            .assert()
+            .success();
+        let dir = sandbox.dir().join(".soroban").join("network");
+        let mut read_dir = std::fs::read_dir(dir).unwrap();
+        let file = read_dir.next().unwrap().unwrap();
+        assert_eq!(file.file_name().to_str().unwrap(), "futurenet.toml");
+    });
+}
+
+#[test]
+fn use_default_testnet() {
+    TestEnv::with_default(|sandbox| {
+        sandbox
+            .new_assert_cmd("keys")
+            .args(["generate", "alice", "--network", "testnet"])
+            .assert()
+            .success();
+        let dir = sandbox.dir().join(".soroban").join("network");
+        let mut read_dir = std::fs::read_dir(dir).unwrap();
+        let file = read_dir.next().unwrap().unwrap();
+        assert_eq!(file.file_name().to_str().unwrap(), "testnet.toml");
+    });
+}
+
 fn add_network(sandbox: &TestEnv, name: &str) {
     sandbox
-        .new_assert_cmd("config")
-        .arg("network")
+        .new_assert_cmd("network")
         .arg("add")
         .args([
             "--rpc-url=https://127.0.0.1",
             "--network-passphrase",
-            NETWORK_PASSPHRASE,
+            LOCAL_NETWORK_PASSPHRASE,
             name,
         ])
         .assert()
@@ -59,9 +91,8 @@ fn add_network(sandbox: &TestEnv, name: &str) {
 
 fn add_network_global(sandbox: &TestEnv, dir: &Path, name: &str) {
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("network")
         .env("XDG_CONFIG_HOME", dir.to_str().unwrap())
-        .arg("network")
         .arg("add")
         .arg("--global")
         .arg("--rpc-url")
@@ -81,18 +112,16 @@ fn set_and_remove_global_network() {
     add_network_global(&sandbox, &dir, "global");
 
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("network")
         .env("XDG_CONFIG_HOME", dir.to_str().unwrap())
-        .arg("network")
         .arg("ls")
         .arg("--global")
         .assert()
         .stdout("global\n");
 
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("network")
         .env("XDG_CONFIG_HOME", dir.to_str().unwrap())
-        .arg("network")
         .arg("rm")
         .arg("--global")
         .arg("global")
@@ -100,9 +129,8 @@ fn set_and_remove_global_network() {
         .stdout("");
 
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("network")
         .env("XDG_CONFIG_HOME", dir.to_str().unwrap())
-        .arg("network")
         .arg("ls")
         .assert()
         .stdout("\n");
@@ -111,7 +139,7 @@ fn set_and_remove_global_network() {
 #[test]
 fn multiple_networks() {
     let sandbox = TestEnv::default();
-    let ls = || -> Vec<String> { sandbox.cmd::<network::ls::Cmd>("").ls().unwrap() };
+    let ls = || -> Vec<String> { ls(&sandbox) };
 
     add_network(&sandbox, "local");
     println!("{:#?}", ls());
@@ -143,42 +171,40 @@ fn multiple_networks() {
 }
 
 #[test]
-fn read_identity() {
+fn read_key() {
     let sandbox = TestEnv::default();
     let dir = sandbox.dir().as_ref();
     add_test_id(dir);
     let ident_dir = dir.join(".soroban/identity");
     assert!(ident_dir.exists());
     sandbox
-        .new_assert_cmd("config")
-        .arg("identity")
+        .new_assert_cmd("keys")
         .arg("ls")
         .assert()
-        .stdout("test_id\n");
+        .stdout(predicates::str::contains("test_id\n"));
 }
 
 #[test]
-fn generate_identity() {
+fn generate_key() {
     let sandbox = TestEnv::default();
     sandbox
-        .new_assert_cmd("config")
-        .arg("identity")
+        .new_assert_cmd("keys")
         .arg("generate")
+        .arg("--no-fund")
         .arg("--seed")
         .arg("0000000000000000")
-        .arg("test")
+        .arg("test_2")
         .assert()
         .stdout("")
         .success();
 
     sandbox
-        .new_assert_cmd("config")
-        .arg("identity")
+        .new_assert_cmd("keys")
         .arg("ls")
         .assert()
-        .stdout("test\n");
+        .stdout(predicates::str::contains("test_2\n"));
     let file_contents =
-        fs::read_to_string(sandbox.dir().join(".soroban/identity/test.toml")).unwrap();
+        fs::read_to_string(sandbox.dir().join(".soroban/identity/test_2.toml")).unwrap();
     assert_eq!(
         file_contents,
         format!("seed_phrase = \"{DEFAULT_SEED_PHRASE}\"\n")
@@ -186,10 +212,44 @@ fn generate_identity() {
 }
 
 #[test]
+fn generate_key_on_testnet() {
+    if std::env::var("CI_TEST").is_err() {
+        return;
+    }
+    let sandbox = TestEnv::default();
+    sandbox
+        .new_assert_cmd("keys")
+        .arg("generate")
+        .arg("--rpc-url=https://soroban-testnet.stellar.org:443")
+        .arg("--network-passphrase=Test SDF Network ; September 2015")
+        .arg("test_2")
+        .assert()
+        .stdout("")
+        .stderr("")
+        .success();
+
+    sandbox
+        .new_assert_cmd("keys")
+        .arg("ls")
+        .assert()
+        .stdout(predicates::str::contains("test_2\n"));
+    println!(
+        "aa {}",
+        sandbox
+            .new_assert_cmd("keys")
+            .arg("address")
+            .arg("test_2")
+            .assert()
+            .success()
+            .stdout_as_str()
+    );
+}
+
+#[test]
 fn seed_phrase() {
     let sandbox = TestEnv::default();
     let dir = sandbox.dir();
-    add_identity(
+    add_key(
         dir,
         "test_seed",
         SecretKind::Seed,
@@ -197,20 +257,11 @@ fn seed_phrase() {
     );
 
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("keys")
         .current_dir(dir)
-        .arg("identity")
         .arg("ls")
         .assert()
-        .stdout("test_seed\n");
-}
-
-#[test]
-fn read_address() {
-    let sandbox = TestEnv::default();
-    for hd_path in 0..2 {
-        test_hd_path(&sandbox, hd_path);
-    }
+        .stdout(predicates::str::contains("test_seed\n"));
 }
 
 #[test]
@@ -218,12 +269,11 @@ fn use_env() {
     let sandbox = TestEnv::default();
 
     sandbox
-        .new_assert_cmd("config")
+        .new_assert_cmd("keys")
         .env(
             "SOROBAN_SECRET_KEY",
             "SDIY6AQQ75WMD4W46EYB7O6UYMHOCGQHLAQGQTKHDX4J2DYQCHVCQYFD",
         )
-        .arg("identity")
         .arg("add")
         .arg("bob")
         .assert()
@@ -231,19 +281,10 @@ fn use_env() {
         .success();
 
     sandbox
-        .new_assert_cmd("config")
-        .arg("identity")
+        .new_assert_cmd("keys")
         .arg("show")
         .arg("bob")
         .assert()
         .success()
         .stdout("SDIY6AQQ75WMD4W46EYB7O6UYMHOCGQHLAQGQTKHDX4J2DYQCHVCQYFD\n");
-}
-
-fn test_hd_path(sandbox: &TestEnv, hd_path: usize) {
-    let seed_phrase = sep5::SeedPhrase::from_seed_phrase(DEFAULT_SEED_PHRASE).unwrap();
-    let key_pair = seed_phrase.from_path_index(hd_path, None).unwrap();
-    let pub_key = key_pair.public().to_string();
-    let test_address = sandbox.test_address(hd_path);
-    assert_eq!(pub_key, test_address);
 }

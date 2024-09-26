@@ -1,50 +1,67 @@
 use std::str::FromStr;
 
+use async_trait::async_trait;
 use clap::{command, error::ErrorKind, CommandFactory, FromArgMatches, Parser};
 
+use crate::config;
+
+pub mod cache;
 pub mod completion;
-pub mod config;
 pub mod contract;
 pub mod events;
 pub mod global;
-pub mod lab;
+pub mod keys;
+pub mod network;
 pub mod plugin;
+pub mod snapshot;
+pub mod tx;
 pub mod version;
 
-pub const HEADING_RPC: &str = "Options (RPC)";
-const ABOUT: &str = "Build, deploy, & interact with contracts; set identities to sign with; configure networks; generate keys; and more.
+pub mod txn_result;
 
-Intro: https://soroban.stellar.org
-CLI Reference: https://github.com/stellar/soroban-tools/tree/main/docs/soroban-cli-full-docs.md";
+pub const HEADING_RPC: &str = "Options (RPC)";
+const ABOUT: &str =
+    "Work seamlessly with Stellar accounts, contracts, and assets from the command line.
+
+- Generate and manage keys and accounts
+- Build, deploy, and interact with contracts
+- Deploy asset contracts
+- Stream events
+- Start local testnets
+- Decode, encode XDR
+- More!
+
+For additional information see:
+
+- Stellar Docs: https://developers.stellar.org
+- Smart Contract Docs: https://developers.stellar.org/docs/build/smart-contracts/overview
+- CLI Docs: https://developers.stellar.org/docs/tools/stellar-cli";
 
 // long_about is shown when someone uses `--help`; short help when using `-h`
 const LONG_ABOUT: &str = "
 
-The easiest way to get started is to generate a new identity:
+To get started generate a new identity:
 
-    soroban config identity generate alice
+    stellar keys generate alice
 
-You can use identities with the `--source` flag in other commands later.
+Use keys with the `--source` flag in other commands.
 
-Commands that relate to smart contract interactions are organized under the `contract` subcommand. List them:
+Commands that work with contracts are organized under the `contract` subcommand. List them:
 
-    soroban contract --help
+    stellar contract --help
 
-A Soroban contract has its interface schema types embedded in the binary that gets deployed on-chain, making it possible to dynamically generate a custom CLI for each. `soroban contract invoke` makes use of this:
+Use contracts like a CLI:
 
-    soroban contract invoke --id CCR6QKTWZQYW6YUJ7UP7XXZRLWQPFRV6SWBLQS4ZQOSAF4BOUD77OTE2 --source alice --network testnet -- \
-                            --help
+    stellar contract invoke --id CCR6QKTWZQYW6YUJ7UP7XXZRLWQPFRV6SWBLQS4ZQOSAF4BOUD77OTE2 --source alice --network testnet -- --help
 
-Anything after the `--` double dash (the \"slop\") is parsed as arguments to the contract-specific CLI, generated on-the-fly from the embedded schema. For the hello world example, with a function called `hello` that takes one string argument `to`, here's how you invoke it:
+Anything after the `--` double dash (the \"slop\") is parsed as arguments to the contract-specific CLI, generated on-the-fly from the contract schema. For the hello world example, with a function called `hello` that takes one string argument `to`, here's how you invoke it:
 
-    soroban contract invoke --id CCR6QKTWZQYW6YUJ7UP7XXZRLWQPFRV6SWBLQS4ZQOSAF4BOUD77OTE2 --source alice --network testnet -- \
-                            hello --to world
-
-Full CLI reference: https://github.com/stellar/soroban-tools/tree/main/docs/soroban-cli-full-docs.md";
+    stellar contract invoke --id CCR6QKTWZQYW6YUJ7UP7XXZRLWQPFRV6SWBLQS4ZQOSAF4BOUD77OTE2 --source alice --network testnet -- hello --to world
+";
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "soroban",
+    name = "stellar",
     about = ABOUT,
     version = version::long(),
     long_about = ABOUT.to_string() + LONG_ABOUT,
@@ -90,11 +107,15 @@ impl Root {
     pub async fn run(&mut self) -> Result<(), Error> {
         match &mut self.cmd {
             Cmd::Completion(completion) => completion.run(),
-            Cmd::Config(config) => config.run().await?,
             Cmd::Contract(contract) => contract.run(&self.global_args).await?,
             Cmd::Events(events) => events.run().await?,
-            Cmd::Lab(lab) => lab.run().await?,
+            Cmd::Xdr(xdr) => xdr.run()?,
+            Cmd::Network(network) => network.run(&self.global_args).await?,
+            Cmd::Snapshot(snapshot) => snapshot.run(&self.global_args).await?,
             Cmd::Version(version) => version.run(),
+            Cmd::Keys(id) => id.run().await?,
+            Cmd::Tx(tx) => tx.run(&self.global_args).await?,
+            Cmd::Cache(data) => data.run()?,
         };
         Ok(())
     }
@@ -110,20 +131,37 @@ impl FromStr for Root {
 
 #[derive(Parser, Debug)]
 pub enum Cmd {
-    /// Print shell completion code for the specified shell.
-    #[command(long_about = completion::LONG_ABOUT)]
-    Completion(completion::Cmd),
     /// Tools for smart contract developers
     #[command(subcommand)]
     Contract(contract::Cmd),
-    /// Read and update config
-    #[command(subcommand)]
-    Config(config::Cmd),
     /// Watch the network for contract events
     Events(events::Cmd),
-    /// Experiment with early features and expert tools
+
+    /// Create and manage identities including keys and addresses
     #[command(subcommand)]
-    Lab(lab::Cmd),
+    Keys(keys::Cmd),
+
+    /// Start and configure networks
+    #[command(subcommand)]
+    Network(network::Cmd),
+
+    /// Download a snapshot of a ledger from an archive.
+    #[command(subcommand)]
+    Snapshot(snapshot::Cmd),
+
+    /// Sign, Simulate, and Send transactions
+    #[command(subcommand)]
+    Tx(tx::Cmd),
+
+    /// Decode and encode XDR
+    Xdr(stellar_xdr::cli::Root),
+
+    /// Print shell completion code for the specified shell.
+    #[command(long_about = completion::LONG_ABOUT)]
+    Completion(completion::Cmd),
+    /// Cache for transactions and contract specs
+    #[command(subcommand)]
+    Cache(cache::Cmd),
     /// Print version information
     Version(version::Cmd),
 }
@@ -135,13 +173,32 @@ pub enum Error {
     Contract(#[from] contract::Error),
     #[error(transparent)]
     Events(#[from] events::Error),
-
     #[error(transparent)]
-    Lab(#[from] lab::Error),
+    Keys(#[from] keys::Error),
     #[error(transparent)]
-    Config(#[from] config::Error),
+    Xdr(#[from] stellar_xdr::cli::Error),
     #[error(transparent)]
     Clap(#[from] clap::error::Error),
     #[error(transparent)]
     Plugin(#[from] plugin::Error),
+    #[error(transparent)]
+    Network(#[from] network::Error),
+    #[error(transparent)]
+    Snapshot(#[from] snapshot::Error),
+    #[error(transparent)]
+    Tx(#[from] tx::Error),
+    #[error(transparent)]
+    Cache(#[from] cache::Error),
+}
+
+#[async_trait]
+pub trait NetworkRunnable {
+    type Error;
+    type Result;
+
+    async fn run_against_rpc_server(
+        &self,
+        global_args: Option<&global::Args>,
+        config: Option<&config::Args>,
+    ) -> Result<Self::Result, Self::Error>;
 }

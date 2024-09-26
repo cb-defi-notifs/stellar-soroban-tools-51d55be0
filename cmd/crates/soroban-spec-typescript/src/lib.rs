@@ -7,10 +7,9 @@
 use std::{fs, io};
 
 use crate::types::Type;
-use heck::ToLowerCamelCase;
 use itertools::Itertools;
 use sha2::{Digest, Sha256};
-use stellar_xdr::curr::{ScSpecEntry, WriteXdr};
+use stellar_xdr::curr::{Limits, ScSpecEntry, WriteXdr};
 
 use types::Entry;
 
@@ -61,20 +60,29 @@ pub fn generate_from_wasm(wasm: &[u8]) -> Result<String, FromWasmError> {
 }
 
 fn generate_class(fns: &[Entry], spec: &[ScSpecEntry]) -> String {
-    let methods = fns.iter().map(entry_to_ts).join("\n\n    ");
+    let method_types = fns.iter().map(entry_to_method_type).join("");
+    let from_jsons = fns
+        .iter()
+        .filter_map(entry_to_name_and_return_type)
+        .map(|(method, return_type)| format!("{method}: this.txFromJSON<{return_type}>"))
+        .join(",\n        ");
     let spec = spec
         .iter()
-        .map(|s| format!("\"{}\"", s.to_xdr_base64().unwrap()))
+        .map(|s| format!("\"{}\"", s.to_xdr_base64(Limits::none()).unwrap()))
         .join(",\n        ");
     format!(
-        r#"export class Contract {{
-            spec: ContractSpec;
-    constructor(public readonly options: ClassOptions) {{
-        this.spec = new ContractSpec([
-            {spec}
-            ]);
-    }}
-    {methods}
+        r#"export interface Client {{{method_types}
+}}
+export class Client extends ContractClient {{
+  constructor(public readonly options: ContractClientOptions) {{
+    super(
+      new ContractSpec([ {spec} ]),
+      options
+    )
+  }}
+  public readonly fromJSON = {{
+    {from_jsons}
+  }}
 }}"#,
     )
 }
@@ -88,67 +96,93 @@ pub fn generate(spec: &[ScSpecEntry]) -> String {
             cases: vec![],
         });
     }
+    // Filter out function entries with names that start with "__" and partition the results
     let (fns, other): (Vec<_>, Vec<_>) = collected
         .into_iter()
+        .filter(|entry| !matches!(entry, Entry::Function { name, .. } if name.starts_with("__")))
         .partition(|entry| matches!(entry, Entry::Function { .. }));
-    let top = other.iter().map(entry_to_ts).join("\n");
+    let top = other.iter().map(entry_to_method_type).join("\n");
     let bottom = generate_class(&fns, spec);
     format!("{top}\n\n{bottom}")
 }
 
-fn doc_to_ts_doc(doc: &str) -> String {
-    if doc.is_empty() {
-        String::new()
-    } else {
-        let doc = doc.split('\n').join("\n * ");
-        format!(
-            r#"/**
-     * {doc}
-     */
-"#,
-        )
+fn doc_to_ts_doc(doc: &str, method: Option<&str>, indent_level: usize) -> String {
+    let indent = "  ".repeat(indent_level);
+    if let Some(method) = method {
+        let doc = if doc.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n{}   * {}",
+                indent,
+                doc.split('\n').join(&format!("\n{indent}   * "))
+            )
+        };
+        return format!(
+            r#"{indent}/**
+{indent}   * Construct and simulate a {method} transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.{doc}
+{indent}   */"#
+        );
     }
+
+    if doc.is_empty() {
+        return String::new();
+    }
+
+    let doc = doc.split('\n').join(&format!("\n{indent} * "));
+    format!(
+        r#"{indent}/**
+{indent} * {doc}
+{indent} */
+"#
+    )
 }
 
 fn is_error_enum(entry: &ScSpecEntry) -> bool {
     matches!(entry, ScSpecEntry::UdtErrorEnumV0(_))
 }
 
-fn method_options(return_type: &String) -> String {
-    format!(
-        r#"{{
-        /**
-         * The fee to pay for the transaction. Default: 100.
-         */
-        fee?: number
-        /**
-         * What type of response to return.
-         *
-         *   - `undefined`, the default, parses the returned XDR as `{return_type}`. Runs preflight, checks to see if auth/signing is required, and sends the transaction if so. If there's no error and `secondsToWait` is positive, awaits the finalized transaction.
-         *   - `'simulated'` will only simulate/preflight the transaction, even if it's a change/set method that requires auth/signing. Returns full preflight info.
-         *   - `'full'` return the full RPC response, meaning either 1. the preflight info, if it's a view/read method that doesn't require auth/signing, or 2. the `sendTransaction` response, if there's a problem with sending the transaction or if you set `secondsToWait` to 0, or 3. the `getTransaction` response, if it's a change method with no `sendTransaction` errors and a positive `secondsToWait`.
-         */
-        responseType?: R
-        /**
-         * If the simulation shows that this invocation requires auth/signing, `invoke` will wait `secondsToWait` seconds for the transaction to complete before giving up and returning the incomplete {{@link SorobanClient.SorobanRpc.GetTransactionResponse}} results (or attempting to parse their probably-missing XDR with `parseResultXdr`, depending on `responseType`). Set this to `0` to skip waiting altogether, which will return you {{@link SorobanClient.SorobanRpc.SendTransactionResponse}} more quickly, before the transaction has time to be included in the ledger. Default: 10.
-         */
-        secondsToWait?: number
-    }}"#
-    )
-}
+const METHOD_OPTIONS: &str = r"{
+    /**
+     * The fee to pay for the transaction. Default: BASE_FEE
+     */
+    fee?: number;
 
-fn jsify_name(name: &String) -> String {
-    name.to_lower_camel_case()
+    /**
+     * The maximum amount of time to wait for the transaction to complete. Default: DEFAULT_TIMEOUT
+     */
+    timeoutInSeconds?: number;
+
+    /**
+     * Whether to automatically simulate the transaction when constructing the AssembledTransaction. Default: true
+     */
+    simulate?: boolean;
+  }";
+
+pub fn entry_to_name_and_return_type(entry: &Entry) -> Option<(String, String)> {
+    if let Entry::Function { name, outputs, .. } = entry {
+        Some((name.to_owned(), outputs_to_return_type(outputs)))
+    } else {
+        None
+    }
+}
+pub fn outputs_to_return_type(outputs: &[Type]) -> String {
+    match outputs {
+        [] => "null".to_owned(),
+        [output] => type_to_ts(output),
+        outputs => format!("readonly [{}]", outputs.iter().map(type_to_ts).join(", ")),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn entry_to_ts(entry: &Entry) -> String {
+pub fn entry_to_method_type(entry: &Entry) -> String {
     match entry {
         Entry::Function {
             doc,
             name,
             inputs,
             outputs,
+            ..
         } => {
             let input_vals = inputs.iter().map(func_input_to_arg_name).join(", ");
             let input = (!inputs.is_empty())
@@ -159,84 +193,22 @@ pub fn entry_to_ts(entry: &Entry) -> String {
                     )
                 })
                 .unwrap_or_default();
-            let mut is_result = false;
-            let mut return_type: String;
-            if outputs.is_empty() {
-                return_type = "void".to_owned();
-            } else if outputs.len() == 1 {
-                return_type = type_to_ts(&outputs[0]);
-                is_result = return_type.starts_with("Result<");
-            } else {
-                return_type = format!("readonly [{}]", outputs.iter().map(type_to_ts).join(", "));
-            };
-            let ts_doc = doc_to_ts_doc(doc);
-
-            if is_result {
-                return_type = return_type
-                    .strip_prefix("Result<")
-                    .unwrap()
-                    .strip_suffix('>')
-                    .unwrap()
-                    .to_owned();
-                return_type = format!("Ok<{return_type}> | Err<Error_> | undefined");
-            }
-
-            let mut output = outputs
-                .get(0)
-                .map(|_| format!("this.spec.funcResToNative(\"{name}\", xdr)"))
-                .unwrap_or_default();
-            if is_result {
-                output = format!("new Ok({output})");
-            }
-            if return_type != "void" {
-                output = format!(r#"return {output};"#);
-            };
-            let parse_result_xdr = if return_type == "void" {
-                r"parseResultXdr: () => {}".to_owned()
-            } else {
-                format!(
-                    r"parseResultXdr: (xdr): {return_type} => {{
-                {output}
-            }}"
-                )
-            };
-            let js_name = jsify_name(name);
-            let options = method_options(&return_type);
-            let parsed_scvals = inputs.iter().map(parse_arg_to_scval).join(", ");
-            let args =
-                format!("args: this.spec.funcArgsToScVals(\"{name}\", {{{parsed_scvals}}}),");
-            let mut body = format!(
-                r#"return await invoke({{
-            method: '{name}',
-            {args}
-            ...options,
-            ...this.options,
-            {parse_result_xdr},
-        }});"#
-            );
-            if is_result {
-                body = format!(
-                    r#"try {{
-            {body}
-        }} catch (e) {{
-            let err = parseError(e.toString());
-            if (err) return err;
-            throw e;
-        }}"#
-                );
-            }
+            let doc = doc_to_ts_doc(doc, Some(name), 0);
+            let return_type = outputs_to_return_type(outputs);
             format!(
-                r#"{ts_doc}{js_name} = async <R extends ResponseTypes = undefined>({input}options: {options} = {{}}) => {{
-                    {body}
-    }}
+                r#"
+  {doc}
+  {name}: ({input}options?: {METHOD_OPTIONS}) => Promise<AssembledTransaction<{return_type}>>
 "#
             )
         }
+
         Entry::Struct { doc, name, fields } => {
-            let docs = doc_to_ts_doc(doc);
+            let docs = doc_to_ts_doc(doc, None, 0);
             let fields = fields.iter().map(field_to_ts).join("\n  ");
             format!(
-                r#"{docs}export interface {name} {{
+                r#"
+{docs}export interface {name} {{
   {fields}
 }}
 "#
@@ -244,13 +216,13 @@ pub fn entry_to_ts(entry: &Entry) -> String {
         }
 
         Entry::TupleStruct { doc, name, fields } => {
-            let docs = doc_to_ts_doc(doc);
+            let docs = doc_to_ts_doc(doc, None, 0);
             let fields = fields.iter().map(type_to_ts).join(",  ");
             format!("{docs}export type {name} = readonly [{fields}];")
         }
 
         Entry::Union { name, doc, cases } => {
-            let doc = doc_to_ts_doc(doc);
+            let doc = doc_to_ts_doc(doc, None, 0);
             let cases = cases.iter().map(case_to_ts).join(" | ");
 
             format!(
@@ -259,7 +231,7 @@ pub fn entry_to_ts(entry: &Entry) -> String {
             )
         }
         Entry::Enum { doc, name, cases } => {
-            let doc = doc_to_ts_doc(doc);
+            let doc = doc_to_ts_doc(doc, None, 0);
             let cases = cases.iter().map(enum_case_to_ts).join("\n  ");
             let name = (name == "Error")
                 .then(|| format!("{name}s"))
@@ -272,16 +244,30 @@ pub fn entry_to_ts(entry: &Entry) -> String {
             )
         }
         Entry::ErrorEnum { doc, cases, .. } => {
-            let doc = doc_to_ts_doc(doc);
+            let doc = doc_to_ts_doc(doc, None, 0);
             let cases = cases
                 .iter()
-                .map(|c| format!("{}: {{message:\"{}\"}}", c.value, c.doc))
-                .join(",\n  ");
-            format!(
-                r#"{doc}const Errors = {{
-{cases}
-}}"#
-            )
+                .enumerate()
+                .map(|(i, c)| {
+                    if c.doc.is_empty() {
+                        format!(
+                            "{}  {}: {{message:\"{}\"}}",
+                            if i == 0 { "" } else { "\n" },
+                            c.value,
+                            c.name
+                        )
+                    } else {
+                        format!(
+                            "{}{}  {}: {{message:\"{}\"}}",
+                            if i == 0 { "" } else { "\n" },
+                            doc_to_ts_doc(&c.doc, None, 1),
+                            c.value,
+                            c.name
+                        )
+                    }
+                })
+                .join(",\n");
+            format!("{doc}export const Errors = {{\n{cases}\n}}")
         }
     }
 }
@@ -303,7 +289,7 @@ fn case_to_ts(case: &types::UnionCase) -> String {
 
 fn field_to_ts(field: &types::StructField) -> String {
     let types::StructField { doc, name, value } = field;
-    let doc = doc_to_ts_doc(doc);
+    let doc = doc_to_ts_doc(doc, None, 0);
     let type_ = type_to_ts(value);
     format!("{doc}{name}: {type_};")
 }

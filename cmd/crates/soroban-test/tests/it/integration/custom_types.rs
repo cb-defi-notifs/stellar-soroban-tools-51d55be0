@@ -3,7 +3,7 @@ use serde_json::json;
 use soroban_cli::commands;
 use soroban_test::TestEnv;
 
-use crate::integration::util::{deploy_custom, extend_contract, CUSTOM_TYPES};
+use crate::integration::util::{deploy_custom, extend_contract};
 
 use super::util::invoke_with_roundtrip;
 
@@ -15,9 +15,9 @@ fn invoke_custom(e: &TestEnv, id: &str, func: &str) -> assert_cmd::Command {
 
 #[tokio::test]
 async fn parse() {
-    let sandbox = &TestEnv::default();
-    let id = &deploy_custom(sandbox);
-    extend_contract(sandbox, id, CUSTOM_TYPES).await;
+    let sandbox = &TestEnv::new();
+    let id = &deploy_custom(sandbox).await;
+    extend_contract(sandbox, id).await;
     symbol(sandbox, id);
     string_with_quotes(sandbox, id).await;
     symbol_with_quotes(sandbox, id).await;
@@ -187,7 +187,7 @@ fn number_arg_return_ok(sandbox: &TestEnv, id: &str) {
 
 async fn number_arg_return_err(sandbox: &TestEnv, id: &str) {
     let res = sandbox
-        .invoke(&["--id", id, "--", "u32_fail_on_even", "--u32_=2"])
+        .invoke_with_test(&["--id", id, "--", "u32_fail_on_even", "--u32_=2"])
         .await
         .unwrap_err();
     if let commands::contract::invoke::Error::ContractInvoke(name, doc) = &res {
@@ -201,16 +201,14 @@ fn void(sandbox: &TestEnv, id: &str) {
     invoke_custom(sandbox, id, "woid")
         .assert()
         .success()
-        .stdout("\n")
-        .stderr("");
+        .stdout("\n");
 }
 
 fn val(sandbox: &TestEnv, id: &str) {
     invoke_custom(sandbox, id, "val")
         .assert()
         .success()
-        .stdout("null\n")
-        .stderr("");
+        .stdout("null\n");
 }
 
 async fn i32(sandbox: &TestEnv, id: &str) {
@@ -341,8 +339,8 @@ fn boolean(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"true
-"#,
+            r"true
+",
         );
 }
 fn boolean_two(sandbox: &TestEnv, id: &str) {
@@ -352,8 +350,8 @@ fn boolean_two(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"true
-"#,
+            r"true
+",
         );
 }
 
@@ -362,8 +360,8 @@ fn boolean_no_flag(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"false
-"#,
+            r"false
+",
         );
 }
 
@@ -374,8 +372,8 @@ fn boolean_false(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"false
-"#,
+            r"false
+",
         );
 }
 
@@ -385,15 +383,15 @@ fn boolean_not(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"false
-"#,
+            r"false
+",
         );
 }
 
 fn boolean_not_no_flag(sandbox: &TestEnv, id: &str) {
     invoke_custom(sandbox, id, "not").assert().success().stdout(
-        r#"true
-"#,
+        r"true
+",
     );
 }
 
@@ -402,8 +400,8 @@ fn option_none(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"null
-"#,
+            r"null
+",
         );
 }
 
@@ -413,7 +411,7 @@ fn option_some(sandbox: &TestEnv, id: &str) {
         .assert()
         .success()
         .stdout(
-            r#"1
-"#,
+            r"1
+",
         );
 }

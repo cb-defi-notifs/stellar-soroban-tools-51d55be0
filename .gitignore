@@ -1,5 +1,10 @@
 target/
 captive-core/
 .soroban/
+snapshot.json
 !test.toml
 *.sqlite
+test_snapshots
+.vscode/settings.json
+.idea
+local.sh

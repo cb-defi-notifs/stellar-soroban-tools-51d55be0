@@ -1,11 +1,20 @@
+use crate::config::locator;
+use crate::config::network::Network;
 use clap::arg;
-use soroban_env_host::xdr::{self, LedgerKey, LedgerKeyContractCode};
+use sha2::{Digest, Sha256};
+use soroban_env_host::xdr::{self, Hash, LedgerKey, LedgerKeyContractCode};
+use soroban_rpc::Client;
+use soroban_spec_tools::contract::{self, Spec};
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
+use stellar_xdr::curr::{ContractDataEntry, ContractExecutable, ScVal};
 
-use crate::utils::{self, contract_spec::ContractSpec};
+use crate::utils::rpc::get_remote_wasm_from_hash;
+use crate::utils::{self};
+
+use crate::wasm::Error::{ContractIsStellarAsset, UnexpectedContractToken};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -25,7 +34,19 @@ pub enum Error {
     #[error(transparent)]
     Parser(#[from] wasmparser::BinaryReaderError),
     #[error(transparent)]
-    ContractSpec(#[from] crate::utils::contract_spec::Error),
+    ContractSpec(#[from] contract::Error),
+
+    #[error(transparent)]
+    Locator(#[from] locator::Error),
+    #[error(transparent)]
+    Rpc(#[from] soroban_rpc::Error),
+    #[error("unexpected contract data {0:?}")]
+    UnexpectedContractToken(ContractDataEntry),
+    #[error(
+        "cannot fetch wasm for contract because the contract is \
+    a network built-in asset contract that does not have a downloadable code binary"
+    )]
+    ContractIsStellarAsset,
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -60,9 +81,13 @@ impl Args {
 
     /// # Errors
     /// May fail to read wasm file or parse xdr section
-    pub fn parse(&self) -> Result<ContractSpec, Error> {
+    pub fn parse(&self) -> Result<Spec, Error> {
         let contents = self.read()?;
-        Ok(ContractSpec::new(&contents)?)
+        Ok(Spec::new(&contents)?)
+    }
+
+    pub fn hash(&self) -> Result<Hash, Error> {
+        Ok(Hash(Sha256::digest(self.read()?).into()))
     }
 }
 
@@ -90,4 +115,29 @@ pub fn len(p: &Path) -> Result<u64, Error> {
             error: e,
         })?
         .len())
+}
+
+pub async fn fetch_from_contract(
+    contract_id: &str,
+    network: &Network,
+    locator: &locator::Args,
+) -> Result<Vec<u8>, Error> {
+    tracing::trace!(?network);
+
+    let contract_id = &locator
+        .resolve_contract_id(contract_id, &network.network_passphrase)?
+        .0;
+
+    let client = Client::new(&network.rpc_url)?;
+    client
+        .verify_network_passphrase(Some(&network.network_passphrase))
+        .await?;
+    let data_entry = client.get_contract_data(contract_id).await?;
+    if let ScVal::ContractInstance(contract) = &data_entry.val {
+        return match &contract.executable {
+            ContractExecutable::Wasm(hash) => Ok(get_remote_wasm_from_hash(&client, hash).await?),
+            ContractExecutable::StellarAsset => Err(ContractIsStellarAsset),
+        };
+    }
+    Err(UnexpectedContractToken(data_entry))
 }

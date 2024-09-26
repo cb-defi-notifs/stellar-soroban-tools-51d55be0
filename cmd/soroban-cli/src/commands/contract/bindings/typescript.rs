@@ -1,18 +1,18 @@
 use std::{ffi::OsString, fmt::Debug, path::PathBuf};
 
 use clap::{command, Parser};
+use soroban_spec_tools::contract as contract_spec;
 use soroban_spec_typescript::{self as typescript, boilerplate::Project};
+use stellar_strkey::DecodeError;
 
 use crate::wasm;
 use crate::{
-    commands::{
-        config::{
-            locator,
-            network::{self, Network},
-        },
-        contract::{self, fetch},
+    commands::{contract::fetch, global, NetworkRunnable},
+    config::{
+        self, locator,
+        network::{self, Network},
     },
-    utils::contract_spec::{self, ContractSpec},
+    get_spec::{self, get_remote_contract_spec},
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -23,17 +23,17 @@ pub struct Cmd {
     pub wasm: Option<std::path::PathBuf>,
     /// Where to place generated project
     #[arg(long)]
-    output_dir: PathBuf,
+    pub output_dir: PathBuf,
     /// Whether to overwrite output directory if it already exists
     #[arg(long)]
-    overwrite: bool,
+    pub overwrite: bool,
     /// The contract ID/address on the network
     #[arg(long, visible_alias = "id")]
-    contract_id: String,
+    pub contract_id: String,
     #[command(flatten)]
-    locator: locator::Args,
+    pub locator: locator::Args,
     #[command(flatten)]
-    network: network::Args,
+    pub network: network::Args,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -65,22 +65,47 @@ pub enum Error {
     Wasm(#[from] wasm::Error),
     #[error("Failed to get file name from path: {0:?}")]
     FailedToGetFileName(PathBuf),
+    #[error("cannot parse contract ID {0}: {1}")]
+    CannotParseContractId(String, DecodeError),
+    #[error(transparent)]
+    UtilsError(#[from] get_spec::Error),
+    #[error(transparent)]
+    Config(#[from] config::Error),
 }
 
-impl Cmd {
-    pub async fn run(&self) -> Result<(), Error> {
+#[async_trait::async_trait]
+impl NetworkRunnable for Cmd {
+    type Error = Error;
+    type Result = ();
+
+    async fn run_against_rpc_server(
+        &self,
+        global_args: Option<&global::Args>,
+        config: Option<&config::Args>,
+    ) -> Result<(), Error> {
         let spec = if let Some(wasm) = &self.wasm {
             let wasm: wasm::Args = wasm.into();
             wasm.parse()?.spec
         } else {
-            let fetch = contract::fetch::Cmd {
-                contract_id: self.contract_id.clone(),
-                out_file: None,
-                locator: self.locator.clone(),
-                network: self.network.clone(),
-            };
-            let bytes = fetch.get_bytes().await?;
-            ContractSpec::new(&bytes)?.spec
+            let network = config.map_or_else(
+                || self.network.get(&self.locator).map_err(Error::from),
+                |c| c.get_network().map_err(Error::from),
+            )?;
+
+            let contract_id = self
+                .locator
+                .resolve_contract_id(&self.contract_id, &network.network_passphrase)?
+                .0;
+
+            get_remote_contract_spec(
+                &contract_id,
+                &self.locator,
+                &self.network,
+                global_args,
+                config,
+            )
+            .await
+            .map_err(Error::from)?
         };
         if self.output_dir.is_file() {
             return Err(Error::IsFile(self.output_dir.clone()));
@@ -98,11 +123,12 @@ impl Cmd {
             rpc_url,
             network_passphrase,
             ..
-        } = self
-            .network
-            .get(&self.locator)
-            .ok()
-            .unwrap_or_else(Network::futurenet);
+        } = self.network.get(&self.locator).ok().unwrap_or_else(|| {
+            network::DEFAULTS
+                .get("futurenet")
+                .expect("why did we remove the default futurenet network?")
+                .into()
+        });
         let absolute_path = self.output_dir.canonicalize()?;
         let file_name = absolute_path
             .file_name()
@@ -129,5 +155,11 @@ impl Cmd {
             .spawn()?
             .wait()?;
         Ok(())
+    }
+}
+
+impl Cmd {
+    pub async fn run(&self) -> Result<(), Error> {
+        self.run_against_rpc_server(None, None).await
     }
 }
